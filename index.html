@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>新宿都庁周辺リアルドライビングゲーム</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; }
+        #gameContainer { position: relative; width: 100vw; height: 100vh; }
+        #ui { position: absolute; top: 10px; left: 10px; z-index: 100; color: white; }
+        #carSelector { position: absolute; top: 10px; right: 10px; z-index: 100; }
+        #controls { position: absolute; bottom: 10px; left: 10px; z-index: 100; color: white; }
+        #warning { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
+                   color: red; font-size: 24px; font-weight: bold; z-index: 200; display: none; }
+        select { padding: 5px; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <div id="ui">
+            <h3>新宿都庁周辺リアルドライビング</h3>
+            <div>速度: <span id="speed">0</span> km/h</div>
+        </div>
+        <div id="carSelector">
+            <select id="carSelect">
+                <option value="ferrari">フェラーリ488 (赤)</option>
+                <option value="porsche">ポルシェ911 (青)</option>
+                <option value="aston">アストンマーチンDB11 (黄)</option>
+            </select>
+        </div>
+        <div id="controls">
+            <div>WASD: 移動 | マウス: カメラ回転 | ホイール: 拡大縮小</div>
+        </div>
+        <div id="warning">⚠️ 逆走警告 ⚠️</div>
+    </div>
+
+    <script>
+        // シーン、カメラ、レンダラーの初期化
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.getElementById('gameContainer').appendChild(renderer.domElement);
+
+        // OrbitControls for mouse interaction
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.enableZoom = true;
+        controls.enableRotate = true;
+        controls.enablePan = false;
+
+        // 音響システム
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        let engineOscillator = null;
+        let warningOscillator = null;
+        let engineGain = null;
+        let warningGain = null;
+
+        function initAudio() {
+            // エンジン音
+            engineOscillator = audioContext.createOscillator();
+            engineGain = audioContext.createGain();
+            engineOscillator.connect(engineGain);
+            engineGain.connect(audioContext.destination);
+            engineOscillator.type = 'sawtooth';
+            engineOscillator.frequency.setValueAtTime(100, audioContext.currentTime);
+            engineGain.gain.setValueAtTime(0, audioContext.currentTime);
+            engineOscillator.start();
+
+            // 警告音
+            warningOscillator = audioContext.createOscillator();
+            warningGain = audioContext.createGain();
+            warningOscillator.connect(warningGain);
+            warningGain.connect(audioContext.destination);
+            warningOscillator.type = 'sine';
+            warningOscillator.frequency.setValueAtTime(800, audioContext.currentTime);
+            warningGain.gain.setValueAtTime(0, audioContext.currentTime);
+            warningOscillator.start();
+        }
+
+        function updateEngineSound(speed) {
+            if (engineOscillator && engineGain) {
+                const absSpeed = Math.abs(speed);
+                const frequency = 100 + absSpeed * 3;
+                const volume = Math.min(absSpeed / 100 * 0.1, 0.1);
+                
+                engineOscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
+                engineGain.gain.setValueAtTime(volume, audioContext.currentTime);
+            }
+        }
+
+        function playWarningSound(play) {
+            if (warningGain) {
+                if (play) {
+                    warningGain.gain.setValueAtTime(0.05, audioContext.currentTime);
+                    document.getElementById('warning').style.display = 'block';
+                } else {
+                    warningGain.gain.setValueAtTime(0, audioContext.currentTime);
+                    document.getElementById('warning').style.display = 'none';
+                }
+            }
+        }
+
+        // 音声初期化（ユーザーインタラクション後）
+        document.addEventListener('click', () => {
+            if (audioContext.state === 'suspended') {
+                audioContext.resume().then(() => {
+                    if (!engineOscillator) initAudio();
+                });
+            }
+        }, { once: true });
+
+        // 照明設定
+        const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+        scene.add(ambientLight);
+        
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(100, 200, 100);
+        directionalLight.castShadow = true;
+        directionalLight.shadow.mapSize.width = 2048;
+        directionalLight.shadow.mapSize.height = 2048;
+        scene.add(directionalLight);
+
+        // スポーツカーの作成
+        function createSportsCar(brand) {
+            const carGroup = new THREE.Group();
+            
+            if (brand === 'ferrari') {
+                // フェラーリ488風デザイン
+                // メインボディ（流線型）
+                const bodyGeometry = new THREE.BoxGeometry(8, 2.2, 20);
+                const bodyMaterial = new THREE.MeshPhongMaterial({ 
+                    color: 0xdc143c, 
+                    shininess: 100,
+                    specular: 0x111111 
+                });
+                const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+                body.position.y = 2.5;
+                body.castShadow = true;
+                carGroup.add(body);
+
+                // フロントノーズ
+                const noseGeometry = new THREE.ConeGeometry(3, 4, 8);
+                const noseMaterial = new THREE.MeshPhongMaterial({ color: 0xb71c1c });
+                const nose = new THREE.Mesh(noseGeometry, noseMaterial);
+                nose.position.set(0, 2.5, 12);
+                nose.rotation.x = Math.PI / 2;
+                carGroup.add(nose);
+
+                // サイドエアインテーク
+                const intakeGeometry = new THREE.BoxGeometry(1, 1.5, 3);
+                const intakeMaterial = new THREE.MeshPhongMaterial({ color: 0x000000 });
+                [-4.5, 4.5].forEach(x => {
+                    const intake = new THREE.Mesh(intakeGeometry, intakeMaterial);
+                    intake.position.set(x, 2, 2);
+                    carGroup.add(intake);
+                });
+
+                // リアスポイラー
+                const spoilerGeometry = new THREE.BoxGeometry(10, 0.8, 1.5);
+                const spoilerMaterial = new THREE.MeshPhongMaterial({ color: 0x8b0000 });
+                const spoiler = new THREE.Mesh(spoilerGeometry, spoilerMaterial);
+                spoiler.position.set(0, 5, -10);
+                carGroup.add(spoiler);
+
+                // ウィンドシールド
+                const windshieldGeometry = new THREE.BoxGeometry(6.5, 1.8, 6);
+                const windshieldMaterial = new THREE.MeshPhongMaterial({ 
+                    color: 0x87ceeb, 
+                    transparent: true, 
+                    opacity: 0.3 
+                });
+                const windshield = new THREE.Mesh(windshieldGeometry, windshieldMaterial);
+                windshield.position.set(0, 4.2, 3);
+                carGroup.add(windshield);
+
+            } else if (brand === 'porsche') {
+                // ポルシェ911風デザイン
+                // メインボディ
+                const bodyGeometry = new THREE.BoxGeometry(7.8, 2.8, 18);
+                const bodyMaterial = new THREE.MeshPhongMaterial({ 
+                    color: 0x1565c0, 
+                    shininess: 120,
+                    specular: 0x222222 
+                });
+                const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+                body.position.y = 2.8;
+                body.castShadow = true;
+                carGroup.add(body);
+
+                // 特徴的なルーフライン
+                const roofGeometry = new THREE.CylinderGeometry(3.5, 4.2, 10, 12);
+                const roofMaterial = new THREE.MeshPhongMaterial({ color: 0x0d47a1 });
+                const roof = new THREE.Mesh(roofGeometry, roofMaterial);
+                roof.position.set(0, 5.2, 0);
+                roof.rotation.x = Math.PI / 2;
+                carGroup.add(roof);
+
+                // フロントライト
+                const lightGeometry = new THREE.SphereGeometry(0.8, 8, 8);
+                const lightMaterial = new THREE.MeshPhongMaterial({ 
+                    color: 0xffffff, 
+                    emissive: 0x444444 
+                });
+                [-2.5, 2.5].forEach(x => {
+                    const light = new THREE.Mesh(lightGeometry, lightMaterial);
+                    light.position.set(x, 3, 8.5);
+                    carGroup.add(light);
+                });
+
+                // リアエンジンカバー
+                const engineGeometry = new THREE.BoxGeometry(6, 1.5, 4);
+                const engineMaterial = new THREE.MeshPhongMaterial({ color: 0x0277bd });
+                const engine = new THREE.Mesh(engineGeometry, engineMaterial);
+                engine.position.set(0, 4.5, -7);
+                carGroup.add(engine);
+
+            } else if (brand === 'aston') {
+                // アストンマーチンDB11風デザイン
+                // メインボディ
+                const bodyGeometry = new THREE.BoxGeometry(8.2, 3, 19);
+                const bodyMaterial = new THREE.MeshPhongMaterial({ 
+                    color: 0xffd700, 
+                    shininess: 150,
+                    specular: 0x333333 
+                });
+                const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+                body.position.y = 2.8;
+                body.castShadow = true;
+                carGroup.add(body);
+
+                // エレガントなキャビン
+                const cabinGeometry = new THREE.BoxGeometry(7, 2.2, 9);
+                const cabinMaterial = new THREE.MeshPhongMaterial({ 
+                    color: 0x212121, 
+                    transparent: true, 
+                    opacity: 0.8 
+                });
+                const cabin = new THREE.Mesh(cabinGeometry, cabinMaterial);
+                cabin.position.y = 5;
+                carGroup.add(cabin);
+
+                // 特徴的なフロントグリル
+                const grillGeometry = new THREE.BoxGeometry(5, 2, 0.8);
+                const grillMaterial = new THREE.MeshPhongMaterial({ color: 0x424242 });
+                const grill = new THREE.Mesh(grillGeometry, grillMaterial);
+                grill.position.set(0, 3, 9.5);
+                carGroup.add(grill);
+
+                // サイドベント
+                const ventGeometry = new THREE.BoxGeometry(0.5, 1, 2);
+                const ventMaterial = new THREE.MeshPhongMaterial({ color: 0x000000 });
+                [-4.5, 4.5].forEach(x => {
+                    const vent = new THREE.Mesh(ventGeometry, ventMaterial);
+                    vent.position.set(x, 3.5, -2);
+                    carGroup.add(vent);
+                });
+
+                // ボンネットライン
+                const hoodGeometry = new THREE.BoxGeometry(6, 0.3, 8);
+                const hoodMaterial = new THREE.MeshPhongMaterial({ color: 0xe6ac00 });
+                const hood = new THREE.Mesh(hoodGeometry, hoodMaterial);
+                hood.position.set(0, 4.2, 4);
+                carGroup.add(hood);
+            }
+
+            // 高品質タイヤとリム
+            const rimGeometry = new THREE.CylinderGeometry(1.8, 1.8, 0.8);
+            const rimMaterial = new THREE.MeshPhongMaterial({ 
+                color: 0xc0c0c0, 
+                shininess: 100 
+            });
+            const tireGeometry = new THREE.TorusGeometry(1.8, 0.6, 8, 16);
+            const tireMaterial = new THREE.MeshPhongMaterial({ color: 0x1a1a1a });
+            
+            const wheelPositions = [
+                { x: -3.8, y: 1.8, z: 7 },
+                { x: 3.8, y: 1.8, z: 7 },
+                { x: -3.8, y: 1.8, z: -7 },
+                { x: 3.8, y: 1.8, z: -7 }
+            ];
+
+            wheelPositions.forEach(pos => {
+                // リム
+                const rim = new THREE.Mesh(rimGeometry, rimMaterial);
+                rim.position.set(pos.x, pos.y, pos.z);
+                rim.rotation.z = Math.PI / 2;
+                carGroup.add(rim);
+                
+                // タイヤ
+                const tire = new THREE.Mesh(tireGeometry, tireMaterial);
+                tire.position.set(pos.x, pos.y, pos.z);
+                tire.rotation.z = Math.PI / 2;
+                carGroup.add(tire);
+            });
+
+            return carGroup;
+        }
+
+        // 新宿都庁周辺の簡易3Dマップ作成
+        let roadMap = [];
+        function createShinjukuMap() {
+            // 地面
+            const groundGeometry = new THREE.PlaneGeometry(2000, 2000);
+            const groundMaterial = new THREE.MeshLambertMaterial({ color: 0x228B22 });
+            const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            // 道路システム
+            const roadSegments = [
+                // メイン道路（南北）
+                { x: 0, z: 0, width: 50, length: 1000, rotation: 0 },
+                // 交差道路（東西）
+                { x: 0, z: 0, width: 50, length: 800, rotation: Math.PI / 2 },
+                // 支線道路
+                { x: 200, z: 0, width: 30, length: 400, rotation: 0 },
+                { x: -200, z: 0, width: 30, length: 400, rotation: 0 },
+                { x: 0, z: 300, width: 30, length: 600, rotation: Math.PI / 2 },
+                { x: 0, z: -300, width: 30, length: 600, rotation: Math.PI / 2 }
+            ];
+
+            roadSegments.forEach(road => {
+                const roadGeometry = new THREE.PlaneGeometry(road.width, road.length);
+                const roadMaterial = new THREE.MeshLambertMaterial({ color: 0x444444 });
+                const roadMesh = new THREE.Mesh(roadGeometry, roadMaterial);
+                roadMesh.rotation.x = -Math.PI / 2;
+                roadMesh.rotation.z = road.rotation;
+                roadMesh.position.set(road.x, 0.1, road.z);
+                scene.add(roadMesh);
+
+                // 道路データを保存
+                roadMap.push({
+                    x: road.x,
+                    z: road.z,
+                    width: road.width,
+                    length: road.length,
+                    rotation: road.rotation
+                });
+            });
+
+            // 東京都庁第一本庁舎（ツインタワー）
+            createTokyoMetropolitanBuilding(-120, 150);
+            
+            // 東京都庁第二本庁舎
+            createSecondaryGovernmentBuilding(-80, 180);
+            
+            // 都議会議事堂
+            createAssemblyBuilding(-160, 120);
+            
+            // 新宿パークタワー
+            createParkTower(100, -100);
+            
+            // 新宿センタービル
+            createCenterBuilding(150, 80);
+            
+            // その他の高層ビル群
+            const otherBuildings = [
+                { x: 80, z: -150, width: 35, height: 180, depth: 35, color: 0x666666 },
+                { x: -180, z: -80, width: 40, height: 120, depth: 30, color: 0x777777 },
+                { x: 200, z: 120, width: 30, height: 160, depth: 40, color: 0x555555 }
+            ];
+
+            otherBuildings.forEach(building => {
+                const geometry = new THREE.BoxGeometry(building.width, building.height, building.depth);
+                const material = new THREE.MeshLambertMaterial({ color: building.color });
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.position.set(building.x, building.height / 2, building.z);
+                mesh.castShadow = true;
+                scene.add(mesh);
+            });
+        }
+
+        // 東京都庁第一本庁舎（ツインタワー）
+        function createTokyoMetropolitanBuilding(x, z) {
+            // 低層部（共通基盤）
+            const baseGeometry = new THREE.BoxGeometry(80, 60, 60);
+            const baseMaterial = new THREE.MeshLambertMaterial({ color: 0x8B8680 });
+            const base = new THREE.Mesh(baseGeometry, baseMaterial);
+            base.position.set(x, 30, z);
+            base.castShadow = true;
+            scene.add(base);
+
+            // 南塔
+            const southTowerGeometry = new THREE.BoxGeometry(35, 180, 35);
+            const towerMaterial = new THREE.MeshLambertMaterial({ color: 0x9E9E9E });
+            const southTower = new THREE.Mesh(southTowerGeometry, towerMaterial);
+            southTower.position.set(x - 20, 150, z);
+            southTower.castShadow = true;
+            scene.add(southTower);
+
+            // 北塔
+            const northTower = new THREE.Mesh(southTowerGeometry, towerMaterial);
+            northTower.position.set(x + 20, 150, z);
+            northTower.castShadow = true;
+            scene.add(northTower);
+
+            // 展望室（南塔頂上）
+            const observatoryGeometry = new THREE.CylinderGeometry(8, 12, 20, 8);
+            const observatoryMaterial = new THREE.MeshLambertMaterial({ color: 0x757575 });
+            const observatory = new THREE.Mesh(observatoryGeometry, observatoryMaterial);
+            observatory.position.set(x - 20, 250, z);
+            scene.add(observatory);
+
+            // 窓の表現（テクスチャ風）
+            for (let i = 0; i < 15; i++) {
+                for (let j = 0; j < 8; j++) {
+                    const windowGeometry = new THREE.PlaneGeometry(2, 3);
+                    const windowMaterial = new THREE.MeshLambertMaterial({ 
+                        color: Math.random() > 0.7 ? 0xFFFF88 : 0x333366 
+                    });
+                    const window1 = new THREE.Mesh(windowGeometry, windowMaterial);
+                    window1.position.set(x - 20 + 17.6, 70 + i * 10, z - 15 + j * 4);
+                    scene.add(window1);
+
+                    const window2 = new THREE.Mesh(windowGeometry, windowMaterial);
+                    window2.position.set(x + 20 + 17.6, 70 + i * 10, z - 15 + j * 4);
+                    scene.add(window2);
+                }
+            }
+        }
+
+        // 東京都庁第二本庁舎
+        function createSecondaryGovernmentBuilding(x, z) {
+            const geometry = new THREE.BoxGeometry(50, 120, 40);
+            const material = new THREE.MeshLambertMaterial({ color: 0x8D6E63 });
+            const building = new THREE.Mesh(geometry, material);
+            building.position.set(x, 60, z);
+            building.castShadow = true;
+            scene.add(building);
+        }
+
+        // 都議会議事堂
+        function createAssemblyBuilding(x, z) {
+            const geometry = new THREE.BoxGeometry(60, 80, 45);
+            const material = new THREE.MeshLambertMaterial({ color: 0x795548 });
+            const building = new THREE.Mesh(geometry, material);
+            building.position.set(x, 40, z);
+            building.castShadow = true;
+            scene.add(building);
+
+            // ドーム屋根
+            const domeGeometry = new THREE.SphereGeometry(15, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2);
+            const domeMaterial = new THREE.MeshLambertMaterial({ color: 0x4CAF50 });
+            const dome = new THREE.Mesh(domeGeometry, domeMaterial);
+            dome.position.set(x, 95, z);
+            scene.add(dome);
+        }
+
+        // 新宿パークタワー
+        function createParkTower(x, z) {
+            const geometry = new THREE.BoxGeometry(45, 200, 45);
+            const material = new THREE.MeshLambertMaterial({ color: 0x607D8B });
+            const building = new THREE.Mesh(geometry, material);
+            building.position.set(x, 100, z);
+            building.castShadow = true;
+            scene.add(building);
+        }
+
+        // 新宿センタービル
+        function createCenterBuilding(x, z) {
+            const geometry = new THREE.BoxGeometry(40, 170, 35);
+            const material = new THREE.MeshLambertMaterial({ color: 0x546E7A });
+            const building = new THREE.Mesh(geometry, material);
+            building.position.set(x, 85, z);
+            building.castShadow = true;
+            scene.add(building);
+        }
+
+        // 道路上かチェック
+        function isOnRoad(x, z) {
+            for (let road of roadMap) {
+                const dx = x - road.x;
+                const dz = z - road.z;
+                
+                if (road.rotation === 0) {
+                    // 南北道路
+                    if (Math.abs(dx) <= road.width / 2 && Math.abs(dz) <= road.length / 2) {
+                        return true;
+                    }
+                } else {
+                    // 東西道路
+                    if (Math.abs(dx) <= road.length / 2 && Math.abs(dz) <= road.width / 2) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        // 逆走チェック（簡易版）
+        function isWrongWay(carRotation, speed) {
+            if (speed < 10) return false; // 低速時は無視
+            
+            // 車の向きを正規化（0-2π）
+            const normalizedRotation = ((carRotation % (Math.PI * 2)) + (Math.PI * 2)) % (Math.PI * 2);
+            
+            // 南向き（π/2 ± π/4）または北向き（3π/2 ± π/4）で逆走とみなす
+            const southBound = normalizedRotation > Math.PI/4 && normalizedRotation < 3*Math.PI/4;
+            const northBound = normalizedRotation > 5*Math.PI/4 && normalizedRotation < 7*Math.PI/4;
+            
+            return southBound || northBound;
+        }
+
+        // ゲーム変数
+        let car = createSportsCar('ferrari');
+        car.position.set(0, 0, 0);
+        scene.add(car);
+
+        let speed = 0;
+        let maxSpeed = 100;
+        let acceleration = 2;
+        let deceleration = 1;
+        let turnSpeed = 0.02;
+        let cameraDistance = 50;
+        let cameraHeight = 30;
+
+        // カメラ設定
+        camera.position.set(0, cameraHeight, cameraDistance);
+        controls.target.copy(car.position);
+        controls.update();
+
+        // キーボード入力
+        const keys = {};
+        document.addEventListener('keydown', (event) => {
+            keys[event.code] = true;
+        });
+        document.addEventListener('keyup', (event) => {
+            keys[event.code] = false;
+        });
+
+        // 車の選択
+        document.getElementById('carSelect').addEventListener('change', (event) => {
+            const currentPosition = car.position.clone();
+            const currentRotation = car.rotation.clone();
+            scene.remove(car);
+            car = createSportsCar(event.target.value);
+            car.position.copy(currentPosition);
+            car.rotation.copy(currentRotation);
+            scene.add(car);
+        });
+
+        // ゲームループ
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 車の操作
+            if (keys['KeyW']) {
+                speed = Math.min(speed + acceleration, maxSpeed);
+            } else if (keys['KeyS']) {
+                speed = Math.max(speed - acceleration, -maxSpeed / 2);
+            } else {
+                speed *= 0.95; // 自然減速
+            }
+
+            // 改良されたハンドル操作
+            const speedFactor = Math.abs(speed) / maxSpeed;
+            const adjustedTurnSpeed = turnSpeed * speedFactor;
+            
+            if (keys['KeyA']) {
+                car.rotation.y += adjustedTurnSpeed;
+            }
+            if (keys['KeyD']) {
+                car.rotation.y -= adjustedTurnSpeed;
+            }
+
+            // 車の移動（道路制限付き）
+            const direction = new THREE.Vector3(0, 0, -1);
+            direction.applyQuaternion(car.quaternion);
+            const newPosition = car.position.clone().add(direction.multiplyScalar(speed * 0.1));
+
+            // 道路上かチェック
+            if (isOnRoad(newPosition.x, newPosition.z)) {
+                car.position.copy(newPosition);
+            } else {
+                // 道路外の場合は速度を0にして停止
+                speed = 0;
+            }
+
+            // 逆走チェック
+            const wrongWay = isWrongWay(car.rotation.y, Math.abs(speed));
+            playWarningSound(wrongWay);
+
+            // エンジン音更新
+            updateEngineSound(speed);
+
+            // カメラ追従（OrbitControlsと併用）
+            const cameraOffset = new THREE.Vector3(0, cameraHeight, cameraDistance);
+            cameraOffset.applyQuaternion(car.quaternion);
+            const targetPosition = car.position.clone().add(cameraOffset);
+            
+            // スムーズなカメラ移動
+            camera.position.lerp(targetPosition, 0.1);
+            controls.target.lerp(car.position, 0.1);
+            controls.update();
+
+            // UI更新
+            document.getElementById('speed').textContent = Math.abs(speed).toFixed(0);
+
+            renderer.render(scene, camera);
+        }
+
+        // 初期化
+        createShinjukuMap();
+        animate();
+
+        // ウィンドウリサイズ対応
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
